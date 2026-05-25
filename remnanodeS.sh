@@ -359,6 +359,193 @@ remove_script() {
     fi
 }
 
+# ─── Управление скоростью (tc / traffic control) ─────────────────────
+# Файл, где запоминаем выбранный интерфейс и настройки
+TC_STATE="/opt/remnanode/.tc_state"
+
+# Определяет основной сетевой интерфейс (через который идёт интернет)
+detect_iface() {
+    ip route show default 2>/dev/null | awk '/default/ {print $5; exit}'
+}
+
+# Проверяет, установлен ли пакет с tc
+ensure_tc() {
+    if ! command -v tc &>/dev/null; then
+        warn "Утилита tc не найдена, устанавливаю iproute2..."
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq iproute2 >/dev/null 2>&1
+    fi
+    command -v tc &>/dev/null
+}
+
+# Показать текущие настройки tc
+speed_show() {
+    clear
+    draw_header "Текущие настройки скорости"
+    local iface; iface="$(detect_iface)"
+    if [[ -z "$iface" ]]; then
+        err "Не удалось определить сетевой интерфейс."
+        press_enter; return
+    fi
+    echo -e "  Сетевой интерфейс:  ${CYAN}${iface}${NC}"
+    echo
+    step "Дисциплины очередей (qdisc)"
+    tc qdisc show dev "$iface"
+    echo
+    if [[ -f "$TC_STATE" ]]; then
+        step "Сохранённая конфигурация скрипта"
+        cat "$TC_STATE" | sed 's/^/  /'
+    else
+        msg "Ограничения скриптом не задавались."
+    fi
+    press_enter
+}
+
+# Установить общий лимит скорости сервера (исходящий трафик)
+speed_limit() {
+    clear
+    draw_header "Общий лимит скорости сервера"
+    ensure_tc || { err "Не удалось установить tc."; press_enter; return; }
+
+    local iface; iface="$(detect_iface)"
+    if [[ -z "$iface" ]]; then
+        err "Не удалось определить сетевой интерфейс."
+        press_enter; return
+    fi
+    echo -e "  Интерфейс: ${CYAN}${iface}${NC}"
+    echo
+    echo "  Лимит ограничивает ИСХОДЯЩУЮ скорость сервера (отдачу клиентам)."
+    echo "  Укажите значение в Мбит/с (например 100, 500, 1000)."
+    echo
+    read -rp "  Лимит скорости, Мбит/с: " mbit
+
+    if ! [[ "$mbit" =~ ^[0-9]+$ ]] || [[ "$mbit" -le 0 ]]; then
+        err "Нужно положительное число."
+        press_enter; return
+    fi
+
+    step "Применение лимита"
+    # Снимаем прежние настройки
+    tc qdisc del dev "$iface" root 2>/dev/null
+    # HTB-шейпер с общим потолком + fq_codel внутри для честной очереди
+    if tc qdisc add dev "$iface" root handle 1: htb default 10 \
+        && tc class add dev "$iface" parent 1: classid 1:10 htb \
+             rate "${mbit}mbit" ceil "${mbit}mbit" \
+        && tc qdisc add dev "$iface" parent 1:10 handle 10: fq_codel; then
+        echo "LIMIT_MBIT=${mbit}" >  "$TC_STATE"
+        echo "IFACE=${iface}"     >> "$TC_STATE"
+        echo "FAIRQUEUE=on"       >> "$TC_STATE"
+        echo
+        ok "Установлен лимит ${mbit} Мбит/с на интерфейс ${iface}."
+        msg "Внутри лимита включена честная очередь (fq_codel)."
+    else
+        err "Не удалось применить настройки tc."
+        tc qdisc del dev "$iface" root 2>/dev/null
+    fi
+    press_enter
+}
+
+# Включить честную очередь (fair queuing) без жёсткого лимита
+speed_fairqueue() {
+    clear
+    draw_header "Честное распределение канала"
+    ensure_tc || { err "Не удалось установить tc."; press_enter; return; }
+
+    local iface; iface="$(detect_iface)"
+    if [[ -z "$iface" ]]; then
+        err "Не удалось определить сетевой интерфейс."
+        press_enter; return
+    fi
+    echo -e "  Интерфейс: ${CYAN}${iface}${NC}"
+    echo
+    echo "  Режим fq_codel равномерно делит канал между активными"
+    echo "  соединениями: один пользователь не сможет занять всю полосу."
+    echo "  Жёсткого потолка скорости при этом НЕ ставится."
+    echo
+    read -rp "  Включить честную очередь? (y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { warn "Отменено."; press_enter; return; }
+
+    step "Применение"
+    tc qdisc del dev "$iface" root 2>/dev/null
+    if tc qdisc add dev "$iface" root fq_codel; then
+        echo "LIMIT_MBIT=none" >  "$TC_STATE"
+        echo "IFACE=${iface}"  >> "$TC_STATE"
+        echo "FAIRQUEUE=on"    >> "$TC_STATE"
+        echo
+        ok "Честная очередь (fq_codel) включена на ${iface}."
+    else
+        err "Не удалось применить настройки tc."
+    fi
+    press_enter
+}
+
+# Сбросить все ограничения скорости
+speed_reset() {
+    clear
+    draw_header "Сброс ограничений скорости"
+    local iface; iface="$(detect_iface)"
+    if [[ -z "$iface" ]]; then
+        err "Не удалось определить сетевой интерфейс."
+        press_enter; return
+    fi
+    step "Сброс"
+    if tc qdisc del dev "$iface" root 2>/dev/null; then
+        ok "Все ограничения tc на ${iface} сняты."
+    else
+        msg "Активных ограничений не было."
+    fi
+    rm -f "$TC_STATE"
+    echo
+    warn "Настройки tc не сохраняются после перезагрузки сервера."
+    msg "После ребута при необходимости задайте лимит заново."
+    press_enter
+}
+
+# Подменю управления скоростью
+speed_menu() {
+    while true; do
+        clear
+        local iface; iface="$(detect_iface)"
+        local cur="без ограничений"
+        if [[ -f "$TC_STATE" ]]; then
+            . "$TC_STATE" 2>/dev/null
+            if [[ "$LIMIT_MBIT" == "none" ]]; then
+                cur="${GREEN}честная очередь${NC}"
+            elif [[ -n "$LIMIT_MBIT" ]]; then
+                cur="${GREEN}лимит ${LIMIT_MBIT} Мбит/с${NC}"
+            fi
+        fi
+
+        echo -e "${BOLD}${MAGENTA}"
+        echo "  ╔══════════════════════════════════════════════╗"
+        echo "  ║                                              ║"
+        echo "  ║         УПРАВЛЕНИЕ СКОРОСТЬЮ СЕРВЕРА         ║"
+        echo "  ║                                              ║"
+        echo "  ╚══════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        echo -e "   Интерфейс:        ${CYAN}${iface:-не определён}${NC}"
+        echo -e "   Текущий режим:    ${cur}"
+        echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
+        echo
+        echo -e "   ${BOLD}${GREEN}1${NC})  Установить общий лимит скорости"
+        echo -e "   ${BOLD}${GREEN}2${NC})  Включить честное распределение канала"
+        echo -e "   ${BOLD}${GREEN}3${NC})  Показать текущие настройки"
+        echo -e "   ${BOLD}${YELLOW}4${NC})  Сбросить все ограничения"
+        echo -e "   ${BOLD}${RED}0${NC})  Назад в главное меню"
+        echo
+        echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
+        read -rp "   Выберите пункт: " sc
+        case "$sc" in
+            1) speed_limit     ;;
+            2) speed_fairqueue ;;
+            3) speed_show      ;;
+            4) speed_reset     ;;
+            0) return          ;;
+            *) warn "Неверный пункт."; sleep 1 ;;
+        esac
+    done
+}
+
 # ─── Меню ────────────────────────────────────────────────────────────
 show_menu() {
     clear
@@ -388,8 +575,9 @@ show_menu() {
     echo -e "   ${BOLD}${GREEN}5${NC})  Перезапустить ноду"
     echo -e "   ${BOLD}${GREEN}6${NC})  Остановить ноду"
     echo -e "   ${BOLD}${GREEN}7${NC})  Запустить ноду"
-    echo -e "   ${BOLD}${YELLOW}8${NC})  Удалить ноду"
-    echo -e "   ${BOLD}${YELLOW}9${NC})  Удалить этот скрипт"
+    echo -e "   ${BOLD}${MAGENTA}8${NC})  Управление скоростью сервера"
+    echo -e "   ${BOLD}${YELLOW}9${NC})  Удалить ноду"
+    echo -e "   ${BOLD}${YELLOW}10${NC}) Удалить этот скрипт"
     echo -e "   ${BOLD}${RED}0${NC})  Выход"
     echo
     echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
@@ -398,21 +586,35 @@ show_menu() {
 # ─── Точка входа ─────────────────────────────────────────────────────
 main() {
     require_root
+
+    # При первом запуске, если нода ещё не установлена — сразу предлагаем установку
+    if [[ ! -f "$COMPOSE_FILE" ]]; then
+        clear
+        draw_header "Добро пожаловать!"
+        echo "  Нода Remnawave на этом сервере ещё не установлена."
+        echo
+        read -rp "  Установить ноду сейчас? (Y/n): " first
+        if [[ ! "$first" =~ ^[Nn]$ ]]; then
+            install_node
+        fi
+    fi
+
     while true; do
         show_menu
         read -rp "   Выберите пункт: " choice
         case "$choice" in
-            1) install_node  ;;
-            2) update_node   ;;
-            3) status_node   ;;
-            4) logs_node     ;;
-            5) restart_node  ;;
-            6) stop_node     ;;
-            7) start_node    ;;
-            8) remove_node   ;;
-            9) remove_script ;;
-            0) echo; ok "Выход."; echo; exit 0 ;;
-            *) warn "Неверный пункт."; sleep 1 ;;
+            1)  install_node  ;;
+            2)  update_node   ;;
+            3)  status_node   ;;
+            4)  logs_node     ;;
+            5)  restart_node  ;;
+            6)  stop_node     ;;
+            7)  start_node    ;;
+            8)  speed_menu    ;;
+            9)  remove_node   ;;
+            10) remove_script ;;
+            0)  echo; ok "Выход."; echo; exit 0 ;;
+            *)  warn "Неверный пункт."; sleep 1 ;;
         esac
     done
 }
