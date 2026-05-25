@@ -57,6 +57,7 @@ press_enter() {
     echo
     echo -e "  ${YELLOW}Нажмите Enter, чтобы вернуться в меню...${NC}"
     read -r
+    clear
 }
 
 require_root() {
@@ -540,14 +541,66 @@ speed_menu() {
             2) speed_fairqueue ;;
             3) speed_show      ;;
             4) speed_reset     ;;
-            0) return          ;;
+            0) clear; return  ;;
             *) warn "Неверный пункт."; sleep 1 ;;
         esac
     done
 }
 
-# ─── Меню ────────────────────────────────────────────────────────────
-show_menu() {
+# ─── Подменю: установка и управление нодой ───────────────────────────
+node_menu() {
+    while true; do
+        clear
+        local state
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^remnanode$'; then
+            state="${GREEN}● работает${NC}"
+        elif [[ -f "$COMPOSE_FILE" ]]; then
+            state="${YELLOW}● остановлена${NC}"
+        else
+            state="${RED}● не установлена${NC}"
+        fi
+
+        echo -e "${BOLD}${CYAN}"
+        echo "  ╔══════════════════════════════════════════════╗"
+        echo "  ║                                              ║"
+        echo "  ║          REMNAWAVE NODE  ·  МЕНЕДЖЕР         ║"
+        echo "  ║                                              ║"
+        echo "  ╚══════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        echo -e "   Состояние ноды:  ${state}"
+        echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
+        echo
+        echo -e "   ${BOLD}${GREEN}1${NC})  Установить / переустановить ноду"
+        echo -e "   ${BOLD}${GREEN}2${NC})  Обновить ноду"
+        echo -e "   ${BOLD}${GREEN}3${NC})  Статус ноды"
+        echo -e "   ${BOLD}${GREEN}4${NC})  Логи ноды"
+        echo -e "   ${BOLD}${GREEN}5${NC})  Перезапустить ноду"
+        echo -e "   ${BOLD}${GREEN}6${NC})  Остановить ноду"
+        echo -e "   ${BOLD}${GREEN}7${NC})  Запустить ноду"
+        echo -e "   ${BOLD}${YELLOW}8${NC})  Удалить ноду"
+        echo -e "   ${BOLD}${YELLOW}9${NC})  Удалить этот скрипт"
+        echo -e "   ${BOLD}${RED}0${NC})  Назад в главное меню"
+        echo
+        echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
+        read -rp "   Выберите пункт: " choice
+        case "$choice" in
+            1) install_node  ;;
+            2) update_node   ;;
+            3) status_node   ;;
+            4) logs_node     ;;
+            5) restart_node  ;;
+            6) stop_node     ;;
+            7) start_node    ;;
+            8) remove_node   ;;
+            9) remove_script ;;
+            0) clear; return ;;
+            *) warn "Неверный пункт."; sleep 1 ;;
+        esac
+    done
+}
+
+# ─── Стартовое меню (выбор раздела) ──────────────────────────────────
+start_menu() {
     clear
     local state
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^remnanode$'; then
@@ -561,23 +614,15 @@ show_menu() {
     echo -e "${BOLD}${CYAN}"
     echo "  ╔══════════════════════════════════════════════╗"
     echo "  ║                                              ║"
-    echo "  ║          REMNAWAVE NODE  ·  МЕНЕДЖЕР         ║"
+    echo "  ║         REMNAWAVE NODE  ·  ГЛАВНОЕ МЕНЮ      ║"
     echo "  ║                                              ║"
     echo "  ╚══════════════════════════════════════════════╝"
     echo -e "${NC}"
     echo -e "   Состояние ноды:  ${state}"
     echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
     echo
-    echo -e "   ${BOLD}${GREEN}1${NC})  Установить / переустановить ноду"
-    echo -e "   ${BOLD}${GREEN}2${NC})  Обновить ноду"
-    echo -e "   ${BOLD}${GREEN}3${NC})  Статус ноды"
-    echo -e "   ${BOLD}${GREEN}4${NC})  Логи ноды"
-    echo -e "   ${BOLD}${GREEN}5${NC})  Перезапустить ноду"
-    echo -e "   ${BOLD}${GREEN}6${NC})  Остановить ноду"
-    echo -e "   ${BOLD}${GREEN}7${NC})  Запустить ноду"
-    echo -e "   ${BOLD}${MAGENTA}8${NC})  Управление скоростью сервера"
-    echo -e "   ${BOLD}${YELLOW}9${NC})  Удалить ноду"
-    echo -e "   ${BOLD}${YELLOW}10${NC}) Удалить этот скрипт"
+    echo -e "   ${BOLD}${GREEN}1${NC})  Установка и управление нодой"
+    echo -e "   ${BOLD}${MAGENTA}2${NC})  Настройки сети (скорость)"
     echo -e "   ${BOLD}${RED}0${NC})  Выход"
     echo
     echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
@@ -586,35 +631,15 @@ show_menu() {
 # ─── Точка входа ─────────────────────────────────────────────────────
 main() {
     require_root
-
-    # При первом запуске, если нода ещё не установлена — сразу предлагаем установку
-    if [[ ! -f "$COMPOSE_FILE" ]]; then
-        clear
-        draw_header "Добро пожаловать!"
-        echo "  Нода Remnawave на этом сервере ещё не установлена."
-        echo
-        read -rp "  Установить ноду сейчас? (Y/n): " first
-        if [[ ! "$first" =~ ^[Nn]$ ]]; then
-            install_node
-        fi
-    fi
-
+    clear
     while true; do
-        show_menu
-        read -rp "   Выберите пункт: " choice
-        case "$choice" in
-            1)  install_node  ;;
-            2)  update_node   ;;
-            3)  status_node   ;;
-            4)  logs_node     ;;
-            5)  restart_node  ;;
-            6)  stop_node     ;;
-            7)  start_node    ;;
-            8)  speed_menu    ;;
-            9)  remove_node   ;;
-            10) remove_script ;;
-            0)  echo; ok "Выход."; echo; exit 0 ;;
-            *)  warn "Неверный пункт."; sleep 1 ;;
+        start_menu
+        read -rp "   Выберите раздел: " section
+        case "$section" in
+            1) node_menu  ;;
+            2) speed_menu ;;
+            0) clear; ok "Выход."; echo; exit 0 ;;
+            *) warn "Неверный пункт."; sleep 1; clear ;;
         esac
     done
 }
