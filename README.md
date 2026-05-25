@@ -28,13 +28,13 @@
 Запустите на сервере одной командой (от root):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/v2886158-sketch/remnanodeS/main/remnanodeS.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Strm37/remnanodeS/main/remnanodeS.sh)
 ```
 
 или скачайте и запустите вручную:
 
 ```bash
-wget -O remnanodeS.sh https://raw.githubusercontent.com/v2886158-sketch/remnanodeS/main/remnanodeS.sh
+wget -O remnanodeS.sh https://raw.githubusercontent.com/Strm37/remnanodeS/main/remnanodeS.sh
 chmod +x remnanodeS.sh
 sudo bash remnanodeS.sh
 ```
@@ -71,4 +71,3 @@ sudo bash remnanodeS.sh
 ## Лицензия
 
 MIT — используйте, изменяйте и распространяйте свободно.
-
