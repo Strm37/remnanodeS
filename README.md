@@ -71,3 +71,14 @@ sudo bash remnanodeS.sh
 ## Лицензия
 
 MIT — используйте, изменяйте и распространяйте свободно.
+
+## Поддержать автора
+
+Если скрипт оказался полезен, можно поддержать его развитие:
+
+- **USDT(TON)/TON:** `UQAln_hwOv-bT3o18oKHokCEXZizod_RQXvc-flzest4ZCsD`
+- **USDT(TRC20)/TRON:** `TEYMsNHuju5ycmoDESVsvJn3Nwfb2zq2eV`
+- **Bitcoin** `bc1quu7rq50a78er4hyd5eez9vrnd7ppj689wk9gz3`
+- **USDT(ETH)/ETH** `0xeda3a169f6c13a665afa4ed86965575fda1ae6ce`
+
+
