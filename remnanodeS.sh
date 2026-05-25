@@ -129,18 +129,27 @@ install_node() {
 
     step "Данные с панели Remnawave"
     echo "  Откройте панель → Nodes → Management → '+' → создайте ноду."
-    echo "  Скопируйте SSL_CERT (его содержимое выдаётся при создании ноды)."
+    echo "  Нажмите 'Copy docker-compose.yml' (или 'Important information')."
+    echo "  Оттуда нужны два значения: NODE_PORT и SECRET_KEY."
     echo
 
     read -rp "  Введите NODE_PORT [по умолчанию 2222]: " node_port
     node_port="${node_port:-2222}"
 
     echo
-    echo "  Вставьте значение SSL_CERT с панели (одной строкой) и нажмите Enter:"
-    read -rp "  > " ssl_cert
+    echo "  Вставьте строку SECRET_KEY с панели и нажмите Enter."
+    echo "  Можно вставить как с именем переменной (SECRET_KEY=...), так и без."
+    read -rp "  > " secret_raw
 
-    if [[ -z "$ssl_cert" ]]; then
-        err "SSL_CERT не введён. Установка прервана."
+    # Убираем возможное имя переменной и кавычки — оставляем чистое значение
+    secret_key="$secret_raw"
+    secret_key="${secret_key#SECRET_KEY=}"
+    secret_key="${secret_key#SSL_CERT=}"
+    secret_key="${secret_key#\"}"; secret_key="${secret_key%\"}"
+    secret_key="${secret_key#\'}"; secret_key="${secret_key%\'}"
+
+    if [[ -z "$secret_key" ]]; then
+        err "SECRET_KEY не введён. Установка прервана."
         press_enter
         return
     fi
@@ -151,11 +160,11 @@ install_node() {
 
     cat > "$ENV_FILE" <<EOF
 ### Конфигурация ноды Remnawave
-APP_PORT=${node_port}
-${ssl_cert}
+NODE_PORT=${node_port}
+SECRET_KEY=${secret_key}
 EOF
     chmod 600 "$ENV_FILE"
-    ok "Файл .env создан"
+    ok "Файл .env создан (NODE_PORT + SECRET_KEY)"
 
     cat > "$COMPOSE_FILE" <<EOF
 services:
