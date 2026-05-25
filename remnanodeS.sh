@@ -393,13 +393,30 @@ speed_show() {
     step "Дисциплины очередей (qdisc)"
     tc qdisc show dev "$iface"
     echo
+    step "Классы трафика (class)"
+    tc class show dev "$iface" 2>/dev/null || msg "Классы не заданы."
+    echo
     if [[ -f "$TC_STATE" ]]; then
         step "Сохранённая конфигурация скрипта"
-        cat "$TC_STATE" | sed 's/^/  /'
+        sed 's/^/  /' "$TC_STATE"
     else
         msg "Ограничения скриптом не задавались."
     fi
     press_enter
+}
+
+# Спрашивает единицу измерения и возвращает множитель к Мбит
+# Глобальная переменная SPEED_UNIT_NAME — для отображения
+ask_unit() {
+    echo "  В каких единицах задавать скорость?"
+    echo -e "   ${BOLD}1${NC}) Мбит/с — как в тарифах провайдера"
+    echo -e "   ${BOLD}2${NC}) Мбайт/с — как скорость скачивания файла"
+    echo
+    read -rp "  Единица [1/2, по умолчанию 1]: " u
+    case "$u" in
+        2) SPEED_MULT=8;  SPEED_UNIT_NAME="Мбайт/с" ;;   # 1 Мбайт = 8 Мбит
+        *) SPEED_MULT=1;  SPEED_UNIT_NAME="Мбит/с"  ;;
+    esac
 }
 
 # Установить общий лимит скорости сервера (исходящий трафик)
@@ -416,28 +433,33 @@ speed_limit() {
     echo -e "  Интерфейс: ${CYAN}${iface}${NC}"
     echo
     echo "  Лимит ограничивает ИСХОДЯЩУЮ скорость сервера (отдачу клиентам)."
-    echo "  Укажите значение в Мбит/с (например 100, 500, 1000)."
     echo
-    read -rp "  Лимит скорости, Мбит/с: " mbit
+    ask_unit
+    echo
+    read -rp "  Лимит скорости (${SPEED_UNIT_NAME}): " val
 
-    if ! [[ "$mbit" =~ ^[0-9]+$ ]] || [[ "$mbit" -le 0 ]]; then
+    if ! [[ "$val" =~ ^[0-9]+$ ]] || [[ "$val" -le 0 ]]; then
         err "Нужно положительное число."
         press_enter; return
     fi
 
+    local mbit=$(( val * SPEED_MULT ))   # переводим в мегабиты для tc
+
     step "Применение лимита"
-    # Снимаем прежние настройки
     tc qdisc del dev "$iface" root 2>/dev/null
     # HTB-шейпер с общим потолком + fq_codel внутри для честной очереди
     if tc qdisc add dev "$iface" root handle 1: htb default 10 \
         && tc class add dev "$iface" parent 1: classid 1:10 htb \
              rate "${mbit}mbit" ceil "${mbit}mbit" \
         && tc qdisc add dev "$iface" parent 1:10 handle 10: fq_codel; then
-        echo "LIMIT_MBIT=${mbit}" >  "$TC_STATE"
-        echo "IFACE=${iface}"     >> "$TC_STATE"
-        echo "FAIRQUEUE=on"       >> "$TC_STATE"
+        {
+            echo "MODE=limit"
+            echo "IFACE=${iface}"
+            echo "LIMIT_MBIT=${mbit}"
+            echo "SHOW=общий лимит ${val} ${SPEED_UNIT_NAME}"
+        } > "$TC_STATE"
         echo
-        ok "Установлен лимит ${mbit} Мбит/с на интерфейс ${iface}."
+        ok "Установлен лимит ${val} ${SPEED_UNIT_NAME} на интерфейс ${iface}."
         msg "Внутри лимита включена честная очередь (fq_codel)."
     else
         err "Не удалось применить настройки tc."
@@ -446,10 +468,12 @@ speed_limit() {
     press_enter
 }
 
-# Включить честную очередь (fair queuing) без жёсткого лимита
-speed_fairqueue() {
+# Динамическое распределение: коридор скорости «от и до» на поток.
+# Когда канал свободен — потоки идут по максимуму, когда забит —
+# HTB автоматически ужимает каждый поток к минимуму.
+speed_dynamic() {
     clear
-    draw_header "Честное распределение канала"
+    draw_header "Динамическое распределение скорости"
     ensure_tc || { err "Не удалось установить tc."; press_enter; return; }
 
     local iface; iface="$(detect_iface)"
@@ -459,23 +483,79 @@ speed_fairqueue() {
     fi
     echo -e "  Интерфейс: ${CYAN}${iface}${NC}"
     echo
-    echo "  Режим fq_codel равномерно делит канал между активными"
-    echo "  соединениями: один пользователь не сможет занять всю полосу."
-    echo "  Жёсткого потолка скорости при этом НЕ ставится."
+    echo "  Задаётся КОРИДОР скорости на каждый поток трафика:"
+    echo "   • минимум — гарантированная скорость, ниже не опустится;"
+    echo "   • максимум — потолок, когда канал свободен."
     echo
-    read -rp "  Включить честную очередь? (y/N): " confirm
-    [[ "$confirm" =~ ^[Yy]$ ]] || { warn "Отменено."; press_enter; return; }
+    echo "  Когда подключений мало — потоки разгоняются до максимума."
+    echo "  Когда подключений много и канал забит — ядро автоматически"
+    echo "  ужимает каждый поток вниз, к минимуму, чтобы хватило всем."
+    echo
+    ask_unit
+    echo
+    read -rp "  Минимум на поток (${SPEED_UNIT_NAME}): " vmin
+    read -rp "  Максимум на поток (${SPEED_UNIT_NAME}): " vmax
 
-    step "Применение"
+    if ! [[ "$vmin" =~ ^[0-9]+$ ]] || ! [[ "$vmax" =~ ^[0-9]+$ ]] \
+       || [[ "$vmin" -le 0 ]] || [[ "$vmax" -le 0 ]]; then
+        err "Минимум и максимум должны быть положительными числами."
+        press_enter; return
+    fi
+    if [[ "$vmin" -gt "$vmax" ]]; then
+        err "Минимум не может быть больше максимума."
+        press_enter; return
+    fi
+
+    echo
+    echo "  Общий потолок сервера (необязательно) — суммарный максимум"
+    echo "  для всего трафика. Оставьте пустым, если ограничивать не нужно."
+    read -rp "  Общий потолок (${SPEED_UNIT_NAME}, Enter — пропустить): " vtotal
+
+    local min_mbit=$(( vmin * SPEED_MULT ))
+    local max_mbit=$(( vmax * SPEED_MULT ))
+    local total_mbit
+    if [[ -n "$vtotal" ]]; then
+        if ! [[ "$vtotal" =~ ^[0-9]+$ ]] || [[ "$vtotal" -le 0 ]]; then
+            err "Общий потолок должен быть положительным числом."
+            press_enter; return
+        fi
+        total_mbit=$(( vtotal * SPEED_MULT ))
+    else
+        # Без явного потолка берём с большим запасом — 10 Гбит
+        total_mbit=10000
+    fi
+
+    step "Применение динамического распределения"
     tc qdisc del dev "$iface" root 2>/dev/null
-    if tc qdisc add dev "$iface" root fq_codel; then
-        echo "LIMIT_MBIT=none" >  "$TC_STATE"
-        echo "IFACE=${iface}"  >> "$TC_STATE"
-        echo "FAIRQUEUE=on"    >> "$TC_STATE"
+
+    # Корневой класс — общий потолок сервера.
+    # Дочерний класс: rate = минимум на поток (гарантия),
+    #                 ceil = максимум на поток (когда свободно).
+    # fq_codel поверх — честно делит полосу между потоками,
+    # за счёт чего при росте числа потоков каждый ужимается к минимуму.
+    if tc qdisc add dev "$iface" root handle 1: htb default 10 \
+        && tc class add dev "$iface" parent 1:  classid 1:1  htb \
+             rate "${total_mbit}mbit" ceil "${total_mbit}mbit" \
+        && tc class add dev "$iface" parent 1:1 classid 1:10 htb \
+             rate "${min_mbit}mbit" ceil "${max_mbit}mbit" \
+        && tc qdisc add dev "$iface" parent 1:10 handle 10: fq_codel; then
+        {
+            echo "MODE=dynamic"
+            echo "IFACE=${iface}"
+            echo "MIN_MBIT=${min_mbit}"
+            echo "MAX_MBIT=${max_mbit}"
+            echo "TOTAL_MBIT=${total_mbit}"
+            echo "SHOW=коридор ${vmin}-${vmax} ${SPEED_UNIT_NAME} на поток"
+        } > "$TC_STATE"
         echo
-        ok "Честная очередь (fq_codel) включена на ${iface}."
+        ok "Динамическое распределение включено."
+        msg "Коридор на поток: ${vmin}-${vmax} ${SPEED_UNIT_NAME}."
+        [[ -n "$vtotal" ]] && msg "Общий потолок сервера: ${vtotal} ${SPEED_UNIT_NAME}."
+        echo
+        msg "При нехватке канала скорость на поток ужимается автоматически."
     else
         err "Не удалось применить настройки tc."
+        tc qdisc del dev "$iface" root 2>/dev/null
     fi
     press_enter
 }
@@ -498,7 +578,7 @@ speed_reset() {
     rm -f "$TC_STATE"
     echo
     warn "Настройки tc не сохраняются после перезагрузки сервера."
-    msg "После ребута при необходимости задайте лимит заново."
+    msg "После ребута при необходимости задайте их заново."
     press_enter
 }
 
@@ -509,12 +589,10 @@ speed_menu() {
         local iface; iface="$(detect_iface)"
         local cur="без ограничений"
         if [[ -f "$TC_STATE" ]]; then
-            . "$TC_STATE" 2>/dev/null
-            if [[ "$LIMIT_MBIT" == "none" ]]; then
-                cur="${GREEN}честная очередь${NC}"
-            elif [[ -n "$LIMIT_MBIT" ]]; then
-                cur="${GREEN}лимит ${LIMIT_MBIT} Мбит/с${NC}"
-            fi
+            ( . "$TC_STATE" 2>/dev/null )
+            local show_line
+            show_line="$(grep '^SHOW=' "$TC_STATE" 2>/dev/null | cut -d= -f2-)"
+            [[ -n "$show_line" ]] && cur="${GREEN}${show_line}${NC}"
         fi
 
         echo -e "${BOLD}${MAGENTA}"
@@ -528,8 +606,8 @@ speed_menu() {
         echo -e "   Текущий режим:    ${cur}"
         echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
         echo
-        echo -e "   ${BOLD}${GREEN}1${NC})  Установить общий лимит скорости"
-        echo -e "   ${BOLD}${GREEN}2${NC})  Включить честное распределение канала"
+        echo -e "   ${BOLD}${GREEN}1${NC})  Динамическое распределение (коридор от-до)"
+        echo -e "   ${BOLD}${GREEN}2${NC})  Установить общий лимит скорости"
         echo -e "   ${BOLD}${GREEN}3${NC})  Показать текущие настройки"
         echo -e "   ${BOLD}${YELLOW}4${NC})  Сбросить все ограничения"
         echo -e "   ${BOLD}${RED}0${NC})  Назад в главное меню"
@@ -537,11 +615,11 @@ speed_menu() {
         echo -e "   ${GRAY}──────────────────────────────────────────────${NC}"
         read -rp "   Выберите пункт: " sc
         case "$sc" in
-            1) speed_limit     ;;
-            2) speed_fairqueue ;;
-            3) speed_show      ;;
-            4) speed_reset     ;;
-            0) clear; return  ;;
+            1) speed_dynamic ;;
+            2) speed_limit   ;;
+            3) speed_show    ;;
+            4) speed_reset   ;;
+            0) clear; return ;;
             *) warn "Неверный пункт."; sleep 1 ;;
         esac
     done
